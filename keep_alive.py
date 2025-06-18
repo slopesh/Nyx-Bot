@@ -30,6 +30,9 @@ last_health_check = time.time()
 last_gc_time = time.time()
 memory_threshold = 85  # Percentage
 
+# Get port from environment variable (Render sets PORT)
+PORT = int(os.environ.get('PORT', 8080))
+
 # Configure requests session with retry strategy
 session = requests.Session()
 retry_strategy = Retry(
@@ -44,23 +47,32 @@ session.mount("https://", adapter)
 def check_memory():
     """Check memory usage and force garbage collection if needed"""
     global last_gc_time
-    memory = psutil.virtual_memory()
-    
-    if memory.percent > memory_threshold:
-        logger.warning(f"High memory usage detected: {memory.percent}%")
-        gc.collect()
-        last_gc_time = time.time()
-        return True
-    return False
+    try:
+        memory = psutil.virtual_memory()
+        
+        if memory.percent > memory_threshold:
+            logger.warning(f"High memory usage detected: {memory.percent}%")
+            gc.collect()
+            last_gc_time = time.time()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error checking memory: {e}")
+        return False
 
 @app.route('/')
 def home():
     try:
         check_memory()
-        return "Bot is alive!"
+        return jsonify({
+            "status": "online",
+            "message": "Minecraft Proxy Bot is running!",
+            "uptime": f"{int((time.time() - start_time) // 3600)}h {int(((time.time() - start_time) % 3600) // 60)}m",
+            "timestamp": datetime.utcnow().isoformat()
+        })
     except Exception as e:
         logger.error(f"Error in home route: {e}")
-        return "Bot is alive but encountered an error", 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/health')
 def health():
@@ -90,7 +102,9 @@ def health():
             "disk_usage": f"{disk.percent}%",
             "last_health_check": datetime.fromtimestamp(last_health_check).strftime('%Y-%m-%d %H:%M:%S'),
             "memory_warning": memory_warning,
-            "last_gc": datetime.fromtimestamp(last_gc_time).strftime('%Y-%m-%d %H:%M:%S')
+            "last_gc": datetime.fromtimestamp(last_gc_time).strftime('%Y-%m-%d %H:%M:%S'),
+            "environment": os.getenv('ENVIRONMENT', 'production'),
+            "port": PORT
         }
         
         return jsonify(response)
@@ -134,6 +148,11 @@ def metrics():
                 "bytes_recv": net_io.bytes_recv,
                 "packets_sent": net_io.packets_sent,
                 "packets_recv": net_io.packets_recv
+            },
+            "bot": {
+                "uptime": time.time() - start_time,
+                "port": PORT,
+                "environment": os.getenv('ENVIRONMENT', 'production')
             }
         })
     except Exception as e:
@@ -155,17 +174,25 @@ def status():
             "last_health_check": datetime.fromtimestamp(last_health_check).strftime('%Y-%m-%d %H:%M:%S'),
             "time_since_last_health": f"{int(time_since_last_health)}s",
             "environment": os.getenv('ENVIRONMENT', 'production'),
-            "memory_warning": memory_warning
+            "memory_warning": memory_warning,
+            "port": PORT
         })
     except Exception as e:
         logger.error(f"Error in status check: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route('/ping')
+def ping():
+    """Simple ping endpoint for health checks"""
+    return jsonify({"pong": True, "timestamp": datetime.utcnow().isoformat()})
+
 def run():
+    """Run the Flask server"""
     while True:
         try:
-            # Use 0.0.0.0 to make the server publicly available
-            app.run(host='0.0.0.0', port=8080)
+            logger.info(f"Starting Flask server on port {PORT}")
+            # Use 0.0.0.0 to make the server publicly available (required for Render)
+            app.run(host='0.0.0.0', port=PORT, debug=False)
         except Exception as e:
             logger.error(f"Error starting Flask server: {e}")
             # Retry after 5 seconds
@@ -174,6 +201,8 @@ def run():
             gc.collect()
 
 def keep_alive():
+    """Start the keep-alive server in a separate thread"""
+    logger.info("Starting keep-alive server...")
     t = Thread(target=run)
     t.daemon = True  # Make thread daemon so it exits when main program exits
     t.start()
@@ -190,4 +219,6 @@ def keep_alive():
     
     monitor_thread = Thread(target=memory_monitor)
     monitor_thread.daemon = True
-    monitor_thread.start() 
+    monitor_thread.start()
+    
+    logger.info("Keep-alive server started successfully") 
